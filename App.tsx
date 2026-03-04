@@ -1719,14 +1719,26 @@ function LandingPage({
   ];
 
   return (
-    <div
-      className="relative min-h-screen overflow-hidden bg-slate-950 bg-cover bg-center bg-no-repeat text-slate-100"
-      style={{
-        backgroundImage:
-          "linear-gradient(120deg, rgba(2,6,23,0.88), rgba(15,23,42,0.82) 45%, rgba(2,6,23,0.92)), url('/hero-financas.jpg.png')",
-      }}
-    >
-      <div className="pointer-events-none absolute inset-0 bg-slate-950/30" />
+    <div className="relative min-h-screen overflow-hidden bg-slate-950 text-slate-100">
+      <img
+        src="/hero-financas.jpg.png"
+        alt=""
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+      />
+      <video
+        className="pointer-events-none absolute inset-0 h-full w-full object-cover"
+        autoPlay
+        muted
+        loop
+        playsInline
+        preload="metadata"
+        poster="/hero-financas.jpg.png"
+      >
+        <source src="/hero-financas.mp4" type="video/mp4" />
+        <source src="/hero-financas.mp4.mp4" type="video/mp4" />
+      </video>
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(120deg,rgba(2,6,23,0.88),rgba(15,23,42,0.82)_45%,rgba(2,6,23,0.92))]" />
       <div className="pointer-events-none absolute -left-20 top-10 h-72 w-72 rounded-full bg-blue-500/20 blur-3xl" />
       <div className="pointer-events-none absolute bottom-0 right-0 h-80 w-80 rounded-full bg-violet-500/20 blur-3xl" />
       <div className="pointer-events-none absolute left-1/2 top-1/3 h-64 w-64 -translate-x-1/2 rounded-full bg-emerald-500/10 blur-3xl" />
