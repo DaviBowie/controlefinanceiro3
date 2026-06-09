@@ -13,6 +13,10 @@ import type {
 } from "../types";
 import { TransactionType, BillType } from "../types";
 
+// baseURL="/api" é o prefixo global do backend (setGlobalPrefix('api') no main.ts).
+// Todas as chamadas abaixo usam paths relativos (ex: "/auth/register") que o axios
+// concatena com este baseURL → URL final: /api/auth/register.
+// O proxy Vite (/api → http://localhost:8000) garante que chegam ao backend sem CORS.
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "/api";
 
 export const api = axios.create({
