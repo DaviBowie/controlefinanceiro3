@@ -81,8 +81,8 @@ const TIPOS_INV = [
   "Outros",
 ] as const;
 
-type CategoriaDesp = (typeof CATS_DESP)[number];
-type CategoriaRec = (typeof CATS_REC)[number];
+type CategoriaDesp = string;
+type CategoriaRec = string;
 type Forma = (typeof FORMAS)[number];
 type TipoInv = (typeof TIPOS_INV)[number];
 
@@ -180,13 +180,16 @@ type StatusInfo = {
   tone: Tone;
 };
 
-const tabs: Array<{ id: TabId; label: string; icon: LucideIcon; tone: Tone }> = [
+const IA_ENABLED = true;
+const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "/api";
+
+const tabs: Array<{ id: TabId; label: string; icon: LucideIcon; tone: Tone; disabled?: boolean }> = [
   { id: "receitas", label: "Receitas", icon: ArrowDown, tone: "green" },
   { id: "despesas", label: "Despesas", icon: ArrowUp, tone: "red" },
   { id: "receber", label: "A Receber", icon: Wallet, tone: "accent" },
   { id: "pagar", label: "A Pagar", icon: CreditCard, tone: "red" },
   { id: "investimentos", label: "Investimentos", icon: LineChart, tone: "gold" },
-  { id: "ia", label: "Análise IA", icon: Bot, tone: "purple" },
+  { id: "ia", label: "Análise IA", icon: Bot, tone: "purple", disabled: !IA_ENABLED },
 ];
 
 const toneMap: Record<
@@ -543,16 +546,90 @@ function renderMarkdown(text: string): ReactNode[] {
     );
   });
 }
-function IATab({ allData }: { allData: AllData }) {
+interface TransacaoImport {
+  data: string;
+  descricao: string;
+  valor: number;
+  tipo: "debito" | "credito";
+  categoria: string;
+  selecionada: boolean;
+}
+
+type TipoAcao =
+  | "criar_despesa"
+  | "editar_despesa"
+  | "excluir_despesa"
+  | "criar_receita"
+  | "editar_receita"
+  | "excluir_receita"
+  | "criar_categoria_desp"
+  | "criar_categoria_rec";
+
+interface AcaoPendente {
+  acao: TipoAcao;
+  id?: number;
+  nome?: string;
+  data?: string;
+  descricao?: string;
+  valor?: number;
+  categoria?: string;
+  forma?: string;
+  pago?: YesNo;
+  recebido?: YesNo;
+  parcela?: string;
+  obs?: string;
+  aprovada: boolean;
+}
+
+function IATab({
+  allData,
+  setDespesas,
+  setReceitas,
+  catsDesp,
+  catsRec,
+  setExtraCatsDesp,
+  setExtraCatsRec,
+}: {
+  allData: AllData;
+  setDespesas: Dispatch<SetStateAction<Despesa[]>>;
+  setReceitas: Dispatch<SetStateAction<Receita[]>>;
+  catsDesp: string[];
+  catsRec: string[];
+  setExtraCatsDesp: Dispatch<SetStateAction<string[]>>;
+  setExtraCatsRec: Dispatch<SetStateAction<string[]>>;
+}) {
   const { receitas, despesas, receber, pagar, investimentos } = allData;
+  const [chatId, setChatId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [question, setQuestion] = useState("");
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
+  const [uploadando, setUploadando] = useState(false);
+  const [extratoCarregado, setExtratoCarregado] = useState<{ banco: string; periodo: string; total: number } | null>(null);
+  const [transacoesImport, setTransacoesImport] = useState<TransacaoImport[]>([]);
+  const [showImport, setShowImport] = useState(false);
+  const [acoesPendentes, setAcoesPendentes] = useState<AcaoPendente[]>([]);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const hasData = receitas.length > 0 || despesas.length > 0 || investimentos.length > 0;
+
+  useEffect(() => {
+    fetch(`${API_BASE}/chats`, { method: "POST" })
+      .then((r) => r.json())
+      .then((data: { id: string }) => setChatId(data.id))
+      .catch((err) => console.warn("[IATab] não foi possível criar chat inicial:", err));
+  }, []);
+
+  const ensureChatId = async (): Promise<string> => {
+    if (chatId) return chatId;
+    const r = await fetch(`${API_BASE}/chats`, { method: "POST" });
+    if (!r.ok) throw new Error(`Falha ao criar chat (HTTP ${r.status})`);
+    const data = (await r.json()) as { id: string };
+    setChatId(data.id);
+    return data.id;
+  };
 
   const buildContext = () => {
     const totalRec = receitas.reduce((s, r) => s + r.valor, 0);
@@ -562,7 +639,7 @@ function IATab({ allData }: { allData: AllData }) {
     const saldo = totalRec - totalDesp;
     const taxaPoup = totalRec > 0 ? ((saldo / totalRec) * 100).toFixed(1) : "0";
 
-    const byCat = CATS_DESP.map((cat) => ({
+    const byCat = catsDesp.map((cat) => ({
       categoria: cat,
       total: despesas.filter((r) => r.categoria === cat).reduce((s, r) => s + r.valor, 0),
     }))
@@ -630,92 +707,433 @@ ${despesas
 
   const runAnalysis = async () => {
     if (!hasData) return;
-
     setLoading(true);
     setAnalysis(null);
 
-    const prompt = `Você é um consultor financeiro pessoal especializado. Analise os dados financeiros abaixo e forneça uma análise completa e personalizada em português brasileiro.
-
-${buildContext()}
-
-Forneça uma análise estruturada com:
-
-## Diagnóstico Geral
-Avalie a saúde financeira atual de forma direta e honesta.
-
-## Pontos Positivos
-Liste o que o usuário está fazendo bem.
-
-## Alertas e Riscos
-Identifique problemas, gastos excessivos, padrões preocupantes.
-
-## Padrões Detectados
-Identifique padrões nos dados: sazonalidade, categorias que crescem, comportamentos recorrentes.
-
-## Recomendações Prioritárias
-Liste de 3 a 5 ações concretas e específicas que o usuário deve tomar agora.
-
-## Projeção
-Com base nos dados atuais, projete como será a situação financeira em 3 e 6 meses se continuar no mesmo ritmo.
-
-Seja direto, use números reais dos dados, e evite conselhos genéricos. Foque no que os dados mostram especificamente.`;
+    const contextMsg = `Analise meus dados financeiros e forneça uma análise completa e personalizada em português brasileiro.\n\n${buildContext()}\n\nForneça uma análise estruturada com:\n\n## Diagnóstico Geral\nAvalie a saúde financeira atual de forma direta e honesta.\n\n## Pontos Positivos\nListe o que estou fazendo bem.\n\n## Alertas e Riscos\nIdentifique problemas, gastos excessivos, padrões preocupantes.\n\n## Padrões Detectados\nIdentifique sazonalidade, categorias que crescem, comportamentos recorrentes.\n\n## Recomendações Prioritárias\nListe de 3 a 5 ações concretas que devo tomar agora.\n\n## Projeção\nCom base nos dados, projete a situação financeira em 3 e 6 meses.\n\nSeja direto, use números reais e evite conselhos genéricos.`;
 
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const id = await ensureChatId();
+      const res = await fetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          messages: [{ role: "user", content: prompt }],
-        }),
+        body: JSON.stringify({ chat_id: id, message: contextMsg }),
       });
-
-      const data = (await res.json()) as { content?: Array<{ text?: string }> };
-      const text = data.content?.map((b) => b.text || "").join("") || "Erro ao gerar análise.";
-      setAnalysis(text);
-      setChatHistory([{ role: "assistant", content: text, isAnalysis: true }]);
+      const data = (await res.json()) as { response: string };
+      setAnalysis(data.response);
+      setChatHistory([{ role: "assistant", content: data.response, isAnalysis: true }]);
     } catch {
-      setAnalysis("Erro ao conectar com a IA. Tente novamente.");
+      setAnalysis("Erro ao conectar com a IA. Verifique se o servidor está rodando.");
     }
 
     setLoading(false);
   };
 
-  const sendQuestion = async () => {
-    if (!question.trim() || chatLoading) return;
+  /** Monta o contexto financeiro completo com IDs para o LLM gerenciar lançamentos. */
+  const buildFinancialContext = () => {
+    const fmtDesp = (d: Despesa) =>
+      `ID:${d.id} | ${d.data} | ${d.descricao} | R$${d.valor.toFixed(2)} | ${d.categoria} | Forma:${d.forma} | Pago:${d.pago}${d.obs ? ` | Obs:${d.obs}` : ""}`;
+    const fmtRec = (r: Receita) =>
+      `ID:${r.id} | ${r.data} | ${r.descricao} | R$${r.valor.toFixed(2)} | ${r.categoria} | Forma:${r.forma} | Recebido:${r.recebido}${r.obs ? ` | Obs:${r.obs}` : ""}`;
 
-    const userMsg = question.trim();
-    setQuestion("");
+    return [
+      `=== DADOS FINANCEIROS ATUAIS ===`,
+      ``,
+      `DESPESAS (${despesas.length} registros):`,
+      despesas.length > 0 ? despesas.map(fmtDesp).join("\n") : "Nenhuma despesa cadastrada.",
+      ``,
+      `RECEITAS (${receitas.length} registros):`,
+      receitas.length > 0 ? receitas.map(fmtRec).join("\n") : "Nenhuma receita cadastrada.",
+      ``,
+      `CATEGORIAS VÁLIDAS`,
+      `  Despesas: ${catsDesp.join(", ")}`,
+      `  Receitas: ${catsRec.join(", ")}`,
+      `FORMAS: ${FORMAS.join(", ")}`,
+      ``,
+      `REGRA OBRIGATÓRIA: quando o usuário pedir para criar, editar, excluir lançamentos OU criar categorias, EXECUTE imediatamente retornando o bloco \`\`\`json. NUNCA diga "você pode usar" ou explique como fazer — retorne o JSON diretamente junto com uma confirmação curta.`,
+      ``,
+      `Ações disponíveis:`,
+      `  {"acao":"criar_despesa","data":"YYYY-MM-DD","descricao":"...","valor":0.00,"categoria":"...","forma":"Outros","pago":"Sim","obs":""}`,
+      `  {"acao":"editar_despesa","id":ID_EXATO, ...apenas campos a alterar}`,
+      `  {"acao":"excluir_despesa","id":ID_EXATO}`,
+      `  {"acao":"criar_receita","data":"YYYY-MM-DD","descricao":"...","valor":0.00,"categoria":"...","forma":"Outros","recebido":"Sim","obs":""}`,
+      `  {"acao":"editar_receita","id":ID_EXATO, ...apenas campos a alterar}`,
+      `  {"acao":"excluir_receita","id":ID_EXATO}`,
+      `  {"acao":"criar_categoria_desp","nome":"NomeDaCategoria"}`,
+      `  {"acao":"criar_categoria_rec","nome":"NomeDaCategoria"}`,
+      `IDs EXATOS da lista acima. Datas YYYY-MM-DD. Valores numéricos. pago/recebido: "Sim" ou "Não".`,
+      ``,
+      `Exemplo — usuário diz "crie uma despesa de R$50 no mercado hoje":`,
+      `Resposta correta: "Despesa criada." seguido de:`,
+      `\`\`\`json`,
+      `[{"acao":"criar_despesa","data":"${today()}","descricao":"MERCADO","valor":50.00,"categoria":"Alimentação","forma":"Outros","pago":"Sim","obs":""}]`,
+      `\`\`\``,
+    ].join("\n");
+  };
+
+  /** Remove o bloco ```json do texto para exibição limpa no chat. */
+  const limparResposta = (r: string) => r.replace(/```json[\s\S]*?```/g, "").trim();
+
+  /** Extrai lista de ações do bloco ```json na resposta da IA. */
+  const parsearAcoes = (response: string): AcaoPendente[] => {
+    const match = response.match(/```json\s*([\s\S]*?)\s*```/);
+    if (!match) return [];
+    try {
+      const parsed = JSON.parse(match[1]) as unknown[];
+      if (!Array.isArray(parsed)) return [];
+      const validas: TipoAcao[] = [
+        "criar_despesa", "editar_despesa", "excluir_despesa",
+        "criar_receita", "editar_receita", "excluir_receita",
+        "criar_categoria_desp", "criar_categoria_rec",
+      ];
+      return (parsed as AcaoPendente[])
+        .filter((a) => validas.includes(a.acao))
+        .map((a) => ({ ...a, aprovada: true }));
+    } catch {
+      return [];
+    }
+  };
+
+  const validarCatDesp = (c?: string): CategoriaDesp =>
+    catsDesp.includes(c ?? "") ? (c as CategoriaDesp) : "Outros";
+  const validarCatRec = (c?: string): CategoriaRec =>
+    catsRec.includes(c ?? "") ? (c as CategoriaRec) : "Outros";
+  const validarForma = (f?: string): Forma =>
+    (FORMAS as readonly string[]).includes(f ?? "") ? (f as Forma) : "Outros";
+
+  const aplicarAcoes = () => {
+    const aprovadas = acoesPendentes.filter((a) => a.aprovada);
+
+    setDespesas((prev) => {
+      let lista = [...prev];
+      aprovadas.forEach((a, i) => {
+        if (a.acao === "criar_despesa") {
+          lista = [
+            {
+              id: Date.now() + i,
+              data: a.data ?? today(),
+              descricao: a.descricao ?? "",
+              valor: a.valor ?? 0,
+              categoria: validarCatDesp(a.categoria),
+              forma: validarForma(a.forma),
+              pago: a.pago ?? "Sim",
+              parcela: a.parcela ?? "",
+              obs: a.obs ?? "",
+            },
+            ...lista,
+          ];
+        } else if (a.acao === "editar_despesa" && a.id) {
+          lista = lista.map((d) =>
+            d.id === a.id
+              ? {
+                  ...d,
+                  ...(a.data !== undefined && { data: a.data }),
+                  ...(a.descricao !== undefined && { descricao: a.descricao }),
+                  ...(a.valor !== undefined && { valor: a.valor }),
+                  ...(a.categoria !== undefined && { categoria: validarCatDesp(a.categoria) }),
+                  ...(a.forma !== undefined && { forma: validarForma(a.forma) }),
+                  ...(a.pago !== undefined && { pago: a.pago }),
+                  ...(a.parcela !== undefined && { parcela: a.parcela }),
+                  ...(a.obs !== undefined && { obs: a.obs }),
+                }
+              : d,
+          );
+        } else if (a.acao === "excluir_despesa" && a.id) {
+          lista = lista.filter((d) => d.id !== a.id);
+        }
+      });
+      void saveData("despesas", lista);
+      return lista;
+    });
+
+    setReceitas((prev) => {
+      let lista = [...prev];
+      aprovadas.forEach((a, i) => {
+        if (a.acao === "criar_receita") {
+          lista = [
+            {
+              id: Date.now() + 1000 + i,
+              data: a.data ?? today(),
+              descricao: a.descricao ?? "",
+              valor: a.valor ?? 0,
+              categoria: validarCatRec(a.categoria),
+              forma: validarForma(a.forma),
+              recebido: a.recebido ?? "Sim",
+              obs: a.obs ?? "",
+            },
+            ...lista,
+          ];
+        } else if (a.acao === "editar_receita" && a.id) {
+          lista = lista.map((r) =>
+            r.id === a.id
+              ? {
+                  ...r,
+                  ...(a.data !== undefined && { data: a.data }),
+                  ...(a.descricao !== undefined && { descricao: a.descricao }),
+                  ...(a.valor !== undefined && { valor: a.valor }),
+                  ...(a.categoria !== undefined && { categoria: validarCatRec(a.categoria) }),
+                  ...(a.forma !== undefined && { forma: validarForma(a.forma) }),
+                  ...(a.recebido !== undefined && { recebido: a.recebido }),
+                  ...(a.obs !== undefined && { obs: a.obs }),
+                }
+              : r,
+          );
+        } else if (a.acao === "excluir_receita" && a.id) {
+          lista = lista.filter((r) => r.id !== a.id);
+        }
+      });
+      void saveData("receitas", lista);
+      return lista;
+    });
+
+    // Handle custom category creation
+    const novasCatsDesp = aprovadas
+      .filter((a) => a.acao === "criar_categoria_desp" && a.nome)
+      .map((a) => a.nome!);
+    const novasCatsRec = aprovadas
+      .filter((a) => a.acao === "criar_categoria_rec" && a.nome)
+      .map((a) => a.nome!);
+
+    if (novasCatsDesp.length > 0) {
+      setExtraCatsDesp((prev) => {
+        const atualizado = [...prev, ...novasCatsDesp.filter((n) => !prev.includes(n))];
+        localStorage.setItem("extraCatsDesp", JSON.stringify(atualizado));
+        return atualizado;
+      });
+    }
+    if (novasCatsRec.length > 0) {
+      setExtraCatsRec((prev) => {
+        const atualizado = [...prev, ...novasCatsRec.filter((n) => !prev.includes(n))];
+        localStorage.setItem("extraCatsRec", JSON.stringify(atualizado));
+        return atualizado;
+      });
+    }
+
+    const n = aprovadas.length;
+    setAcoesPendentes([]);
+    setChatHistory((prev) => [
+      ...prev,
+      { role: "assistant", content: `${n} ação${n !== 1 ? "ões" : ""} aplicada${n !== 1 ? "s" : ""} com sucesso!` },
+    ]);
+  };
+
+  /** Descrição legível de cada ação para exibição no painel. */
+  const descreverAcao = (a: AcaoPendente): string => {
+    const nomeDesp = despesas.find((d) => d.id === a.id)?.descricao ?? `ID ${a.id}`;
+    const nomeRec = receitas.find((r) => r.id === a.id)?.descricao ?? `ID ${a.id}`;
+    const campos = Object.entries(a)
+      .filter(([k]) => !["acao", "id", "aprovada"].includes(k) && a[k as keyof AcaoPendente] !== undefined)
+      .map(([k, v]) => `${k}: ${String(v)}`)
+      .join(" · ");
+    switch (a.acao) {
+      case "criar_despesa": return `${a.descricao ?? "?"} · R$ ${a.valor?.toFixed(2) ?? "0"} · ${a.categoria ?? "Outros"} · ${a.data ?? ""}`;
+      case "editar_despesa": return `"${nomeDesp}" — ${campos}`;
+      case "excluir_despesa": return `"${nomeDesp}"`;
+      case "criar_receita": return `${a.descricao ?? "?"} · R$ ${a.valor?.toFixed(2) ?? "0"} · ${a.categoria ?? "Outros"} · ${a.data ?? ""}`;
+      case "editar_receita": return `"${nomeRec}" — ${campos}`;
+      case "excluir_receita": return `"${nomeRec}"`;
+      case "criar_categoria_desp": return `Nova categoria de despesa: "${a.nome ?? "?"}"`;
+      case "criar_categoria_rec": return `Nova categoria de receita: "${a.nome ?? "?"}"`;
+    }
+  };
+
+  const sendQuestion = async (msgOverride?: string) => {
+    const userMsg = (msgOverride ?? question).trim();
+    if (!userMsg || chatLoading) return;
+
+    if (!msgOverride) setQuestion("");
     setChatLoading(true);
-
-    const newHistory: ChatMessage[] = [...chatHistory, { role: "user", content: userMsg }];
-    setChatHistory(newHistory);
-
-    const messages: Array<{ role: "user" | "assistant"; content: string }> = [
-      {
-        role: "user",
-        content: `Você é um consultor financeiro pessoal. Aqui estão os dados financeiros do usuário:\n\n${buildContext()}\n\nResponda perguntas sobre as finanças deste usuário de forma direta e personalizada em português.`,
-      },
-      { role: "assistant", content: "Entendido! Analisei seus dados financeiros. Como posso ajudá-lo?" },
-      ...newHistory.filter((m) => !m.isAnalysis).map((m) => ({ role: m.role, content: m.content })),
-    ];
+    setChatHistory((prev) => [...prev, { role: "user", content: userMsg }]);
 
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const id = await ensureChatId();
+
+      // Quando o painel de revisão estiver aberto, usa contexto do extrato
+      const contexto = showImport ? buildReviewContext() : buildFinancialContext();
+      const mensagem = `${contexto}\n\n---\n\n${userMsg}`;
+
+      const res = await fetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, messages }),
+        body: JSON.stringify({ chat_id: id, message: mensagem }),
       });
-      const data = (await res.json()) as { content?: Array<{ text?: string }> };
-      const text = data.content?.map((b) => b.text || "").join("") || "Erro ao responder.";
-      setChatHistory((prev) => [...prev, { role: "assistant", content: text }]);
+      const data = (await res.json()) as { response: string };
+
+      if (showImport) {
+        // Modo revisão: aplica ações diretamente na lista de importação
+        const match = data.response.match(/```json\s*([\s\S]*?)\s*```/);
+        if (match) {
+          try {
+            const acoes = JSON.parse(match[1]) as Array<Record<string, unknown>>;
+            if (Array.isArray(acoes)) aplicarAcoesReview(acoes);
+          } catch { /* json malformado */ }
+        }
+      } else {
+        // Modo normal: enfileira ações para aprovação
+        const acoes = parsearAcoes(data.response);
+        if (acoes.length > 0) setAcoesPendentes(acoes);
+      }
+
+      setChatHistory((prev) => [...prev, { role: "assistant", content: limparResposta(data.response) }]);
     } catch {
       setChatHistory((prev) => [...prev, { role: "assistant", content: "Erro ao conectar. Tente novamente." }]);
     }
 
     setChatLoading(false);
     setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+  };
+
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    const arquivo = e.target.files?.[0];
+    if (!arquivo) return;
+    setUploadando(true);
+    try {
+      const id = await ensureChatId();
+      const formData = new FormData();
+      formData.append("chat_id", id);
+      formData.append("arquivo", arquivo);
+      const res = await fetch(`${API_BASE}/upload-extrato`, { method: "POST", body: formData });
+      if (!res.ok) {
+        const err = (await res.json()) as { detail: string };
+        alert(`Erro do servidor: ${err.detail}`);
+      } else {
+        const dados = (await res.json()) as {
+          banco: string;
+          periodo: string;
+          total_transacoes: number;
+          mensagem: string;
+          transacoes: Array<{ data: string; descricao: string; valor: number; tipo: string; categoria: string }>;
+        };
+        setExtratoCarregado({ banco: dados.banco, periodo: dados.periodo, total: dados.total_transacoes });
+        setChatHistory((prev) => [...prev, { role: "assistant", content: dados.mensagem }]);
+        // Prepara preview — mostra todas, pré-seleciona as com valor negativo (gastos)
+        const todas = (dados.transacoes ?? []).map((t) => ({
+          ...t,
+          tipo: t.valor < 0 ? ("debito" as const) : ("credito" as const),
+          selecionada: t.valor < 0, // pré-seleciona apenas gastos
+        }));
+        setTransacoesImport(todas);
+        setShowImport(todas.length > 0);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[upload-extrato] erro:", err);
+      alert(`Erro de conexão: ${msg}\n\nVerifique:\n1. O servidor está rodando em http://localhost:8000 ?\n2. O Vite dev server foi reiniciado após alterar vite.config.ts?`);
+    } finally {
+      setUploadando(false);
+      e.target.value = "";
+    }
+  };
+
+  const updateTransacao = (i: number, patch: Partial<TransacaoImport>) =>
+    setTransacoesImport((prev) => prev.map((t, j) => (j === i ? { ...t, ...patch } : t)));
+
+  const buildReviewContext = () => {
+    const lista = transacoesImport
+      .map(
+        (t, i) =>
+          `indice:${i} | ${t.data} | ${t.descricao} | R$${Math.abs(t.valor).toFixed(2)} | ${t.categoria} | ${t.selecionada ? "incluído" : "excluído"}`,
+      )
+      .join("\n");
+
+    return [
+      `=== LANÇAMENTOS PENDENTES DE IMPORTAÇÃO (${transacoesImport.length}) ===`,
+      lista,
+      ``,
+      `Categorias válidas: ${CATS_DESP.join(", ")}`,
+      ``,
+      `REGRA OBRIGATÓRIA: quando o usuário pedir qualquer alteração nos lançamentos acima, você DEVE executar imediatamente retornando um bloco \`\`\`json com as ações. NUNCA descreva o que fazer — faça. NUNCA diga "você pode usar" ou "para alterar use" — retorne o JSON diretamente.`,
+      ``,
+      `Ações disponíveis (use apenas os campos necessários):`,
+      `  {"acao":"editar_pendente","indice":N,"categoria":"...","descricao":"...","valor":0.00,"data":"YYYY-MM-DD"}`,
+      `  {"acao":"remover_pendente","indice":N}`,
+      `  {"acao":"editar_por_descricao","contem":"TEXTO","categoria":"...","descricao":"...","valor":0.00}`,
+      `  {"acao":"remover_por_descricao","contem":"TEXTO"}`,
+      `  {"acao":"selecionar_pendente","indice":N,"selecionada":true}`,
+      ``,
+      `Exemplo — usuário diz "mude o índice 0 para Assinaturas":`,
+      `Resposta correta: "Alterado para Assinaturas." seguido de:`,
+      `\`\`\`json`,
+      `[{"acao":"editar_pendente","indice":0,"categoria":"Assinaturas"}]`,
+      `\`\`\``,
+    ].join("\n");
+  };
+
+  const aplicarAcoesReview = (acoes: Array<Record<string, unknown>>) => {
+    setTransacoesImport((prev) => {
+      let lista = [...prev];
+      for (const a of acoes) {
+        if (a.acao === "editar_pendente" && typeof a.indice === "number") {
+          lista = lista.map((t, i) =>
+            i === a.indice
+              ? {
+                  ...t,
+                  ...(a.categoria !== undefined && { categoria: String(a.categoria) }),
+                  ...(a.descricao !== undefined && { descricao: String(a.descricao) }),
+                  ...(a.valor !== undefined && { valor: -Math.abs(Number(a.valor)) }),
+                  ...(a.data !== undefined && { data: String(a.data) }),
+                }
+              : t,
+          );
+        } else if (a.acao === "remover_pendente" && typeof a.indice === "number") {
+          lista = lista.filter((_, i) => i !== a.indice);
+        } else if (a.acao === "editar_por_descricao" && typeof a.contem === "string") {
+          const termo = a.contem.toUpperCase();
+          lista = lista.map((t) =>
+            t.descricao.includes(termo)
+              ? {
+                  ...t,
+                  ...(a.categoria !== undefined && { categoria: String(a.categoria) }),
+                  ...(a.descricao !== undefined && { descricao: String(a.descricao) }),
+                  ...(a.valor !== undefined && { valor: -Math.abs(Number(a.valor)) }),
+                  ...(a.data !== undefined && { data: String(a.data) }),
+                }
+              : t,
+          );
+        } else if (a.acao === "remover_por_descricao" && typeof a.contem === "string") {
+          const termo = a.contem.toUpperCase();
+          lista = lista.filter((t) => !t.descricao.includes(termo));
+        } else if (a.acao === "selecionar_pendente" && typeof a.indice === "number") {
+          lista = lista.map((t, i) =>
+            i === a.indice ? { ...t, selecionada: Boolean(a.selecionada) } : t,
+          );
+        }
+      }
+      return lista;
+    });
+  };
+
+
+  const importarDespesas = () => {
+    const selecionadas = transacoesImport.filter((t) => t.selecionada);
+    const novas: Despesa[] = selecionadas.map((t, i) => ({
+      id: Date.now() + i,
+      data: t.data,
+      descricao: t.descricao,
+      valor: Math.abs(t.valor),
+      categoria: (CATS_DESP as readonly string[]).includes(t.categoria)
+        ? (t.categoria as CategoriaDesp)
+        : "Outros",
+      forma: "Outros",
+      pago: "Sim",
+      parcela: "",
+      obs: "Importado do extrato",
+    }));
+
+    setDespesas((prev) => {
+      const atualizado = [...novas, ...prev];
+      void saveData("despesas", atualizado);
+      return atualizado;
+    });
+    setShowImport(false);
+    setTransacoesImport([]);
+    setChatHistory((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        content: `${novas.length} despesas importadas para o app com sucesso! Você pode vê-las na aba **Despesas**.`,
+      },
+    ]);
   };
 
   const suggestions = [
@@ -777,88 +1195,344 @@ Seja direto, use números reais dos dados, e evite conselhos genéricos. Foque n
         </div>
       )}
 
-      {hasData && (
-        <Section title="Pergunte sobre suas finanças" tone="purple">
-          {chatHistory.filter((m) => !m.isAnalysis).length === 0 && (
-            <div className="mb-5">
-              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Sugestões de perguntas</div>
-              <div className="flex flex-wrap gap-2">
-                {suggestions.map((s) => (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => setQuestion(s)}
-                    className="rounded-full border border-violet-500/35 bg-violet-500/15 px-3.5 py-1.5 text-xs text-slate-300 transition hover:bg-violet-500/30 hover:text-slate-100"
-                  >
-                    {s}
-                  </button>
-                ))}
+      <Section title="Pergunte sobre suas finanças" tone="purple">
+        {/* Ações rápidas */}
+        <div className="mb-5 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploadando}
+            className="inline-flex items-center gap-2 rounded-xl border border-violet-500/40 bg-violet-500/10 px-4 py-2 text-xs font-semibold text-violet-300 transition hover:bg-violet-500/25 disabled:opacity-50"
+            title="Carregar extrato bancário (.csv) — Nubank, Itaú, Bradesco, Santander"
+          >
+            {uploadando ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CreditCard className="h-3.5 w-3.5" />}
+            {uploadando ? "Processando..." : "Carregar extrato CSV"}
+          </button>
+          <input ref={fileInputRef} type="file" accept=".csv" onChange={handleFileChange} className="hidden" />
+
+          {(despesas.length > 0 || receitas.length > 0) && (
+            <button
+              type="button"
+              disabled={chatLoading}
+              onClick={() =>
+                sendQuestion(
+                  "Analise todos os meus lançamentos e corrija as categorias que estiverem erradas ou como 'Outros'. Use as categorias válidas e seja preciso.",
+                )
+              }
+              className="inline-flex items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-xs font-semibold text-amber-300 transition hover:bg-amber-500/25 disabled:opacity-50"
+            >
+              <BrainCircuit className="h-3.5 w-3.5" />
+              Corrigir categorias automaticamente
+            </button>
+          )}
+
+          {extratoCarregado && (
+            <div className="inline-flex items-center gap-2 rounded-xl border border-green-500/40 bg-green-500/10 px-3 py-1.5 text-xs text-green-300">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              <span>
+                {extratoCarregado.banco} · {extratoCarregado.total} transações · {extratoCarregado.periodo}
+              </span>
+              <button
+                type="button"
+                onClick={() => setExtratoCarregado(null)}
+                className="ml-1 text-green-400 hover:text-red-400"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          )}
+
+          {!extratoCarregado && (
+            <span className="text-[11px] text-slate-500">Suporta Nubank, Itaú, Bradesco e Santander</span>
+          )}
+        </div>
+
+        {/* Painel de ações pendentes da IA */}
+        {acoesPendentes.length > 0 && (
+          <div className="mb-5 overflow-hidden rounded-2xl border border-amber-500/30 bg-slate-900/80">
+            <div className="flex items-center justify-between border-b border-slate-800 bg-amber-500/10 px-5 py-3">
+              <div className="flex items-center gap-2">
+                <BrainCircuit className="h-4 w-4 text-amber-300" />
+                <span className="text-sm font-bold text-slate-100">Ações sugeridas pela IA</span>
+                <span className="rounded-full bg-amber-500/25 px-2 py-0.5 text-[11px] font-semibold text-amber-200">
+                  {acoesPendentes.filter((a) => a.aprovada).length} aprovadas
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setAcoesPendentes((p) => p.map((a) => ({ ...a, aprovada: true })))}
+                  className="text-[11px] text-slate-400 hover:text-slate-200"
+                >
+                  Aprovar tudo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAcoesPendentes([])}
+                  className="text-[11px] text-slate-400 hover:text-red-400"
+                >
+                  Descartar
+                </button>
+                <Btn
+                  tone="gold"
+                  small
+                  onClick={aplicarAcoes}
+                  disabled={acoesPendentes.filter((a) => a.aprovada).length === 0}
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    Aplicar aprovadas
+                  </span>
+                </Btn>
               </div>
             </div>
-          )}
 
-          {chatHistory.filter((m) => !m.isAnalysis).length > 0 && (
-            <div className="mb-4 flex max-h-96 flex-col gap-3 overflow-y-auto">
-              {chatHistory
-                .filter((m) => !m.isAnalysis)
-                .map((msg, i) => (
-                  <div key={`${msg.role}-${i}`} className={cn("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
-                    <div
+            <div className="max-h-64 overflow-y-auto">
+              {acoesPendentes.map((a, i) => {
+                const isCreate = a.acao.startsWith("criar");
+                const isDelete = a.acao.startsWith("excluir");
+                return (
+                  <label
+                    key={i}
+                    className={cn(
+                      "flex cursor-pointer items-start gap-3 border-b border-slate-800/50 px-5 py-2.5 last:border-0 transition",
+                      a.aprovada ? "hover:bg-slate-800/30" : "opacity-40",
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={a.aprovada}
+                      onChange={(e) =>
+                        setAcoesPendentes((prev) =>
+                          prev.map((x, j) => (j === i ? { ...x, aprovada: e.target.checked } : x)),
+                        )
+                      }
+                      className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-amber-500"
+                    />
+                    <span
                       className={cn(
-                        "max-w-[80%] border px-4 py-3 text-sm leading-6 text-slate-100",
-                        msg.role === "user"
-                          ? "rounded-[18px_18px_4px_18px] border-violet-400 bg-violet-500"
-                          : "rounded-[18px_18px_18px_4px] border-slate-700 bg-slate-800",
+                        "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase",
+                        isCreate && "bg-green-500/20 text-green-400",
+                        isDelete && "bg-red-500/20 text-red-400",
+                        !isCreate && !isDelete && "bg-violet-500/20 text-violet-300",
                       )}
                     >
-                      {msg.role === "assistant" ? renderMarkdown(msg.content) : msg.content}
-                    </div>
-                  </div>
-                ))}
-
-              {chatLoading && (
-                <div className="flex gap-1.5 px-2 py-1">
-                  {[0, 1, 2].map((i) => (
-                    <div
-                      key={i}
-                      className="h-2 w-2 animate-bounce rounded-full bg-violet-400"
-                      style={{ animationDelay: `${i * 0.15}s` }}
-                    />
-                  ))}
-                </div>
-              )}
-
-              <div ref={chatEndRef} />
+                      {isCreate ? "criar" : isDelete ? "excluir" : "editar"}
+                    </span>
+                    {!a.acao.includes("categoria") && (
+                      <span
+                        className={cn(
+                          "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold",
+                          a.acao.includes("despesa") ? "bg-red-500/10 text-red-300" : "bg-green-500/10 text-green-300",
+                        )}
+                      >
+                        {a.acao.includes("despesa") ? "despesa" : "receita"}
+                      </span>
+                    )}
+                    {a.acao.includes("categoria") && (
+                      <span className="shrink-0 rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300">
+                        categoria
+                      </span>
+                    )}
+                    <span className="flex-1 truncate text-xs text-slate-300">{descreverAcao(a)}</span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setAcoesPendentes((prev) => prev.filter((_, j) => j !== i));
+                      }}
+                      className="shrink-0 text-slate-600 hover:text-red-400"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </label>
+                );
+              })}
             </div>
-          )}
-
-          <div className="flex gap-2.5">
-            <Input
-              className="flex-1 border-violet-500/40 focus:border-violet-400 focus:ring-violet-400/20"
-              placeholder="Ex: Qual mês gastei mais? Devo investir mais? Como reduzir despesas?"
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && sendQuestion()}
-              disabled={chatLoading}
-            />
-            <Btn tone="purple" onClick={sendQuestion} disabled={chatLoading || !question.trim()} small>
-              <span className="inline-flex items-center gap-1.5">
-                {chatLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                Enviar
-              </span>
-            </Btn>
           </div>
-        </Section>
-      )}
+        )}
+
+        {/* Painel de revisão do extrato com chat em tempo real */}
+        {showImport && transacoesImport.length > 0 && (
+          <div className="mb-5 overflow-hidden rounded-2xl border border-violet-500/30 bg-slate-900/80">
+
+            {/* Header */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-violet-500/10 px-5 py-3">
+              <div className="flex items-center gap-2">
+                <Download className="h-4 w-4 text-violet-300" />
+                <span className="text-sm font-bold text-slate-100">Revisar extrato</span>
+                <span className="rounded-full bg-violet-500/30 px-2 py-0.5 text-[11px] font-semibold text-violet-200">
+                  {transacoesImport.filter((t) => t.selecionada).length}/{transacoesImport.length}
+                </span>
+                <span className="text-[11px] text-slate-500">
+                  R$ {transacoesImport.filter((t) => t.selecionada).reduce((s, t) => s + Math.abs(t.valor), 0).toFixed(2).replace(".", ",")}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => setTransacoesImport((p) => p.map((t) => ({ ...t, selecionada: true })))} className="text-[11px] text-slate-400 hover:text-slate-200">Todos</button>
+                <span className="text-slate-700">·</span>
+                <button type="button" onClick={() => setTransacoesImport((p) => p.map((t) => ({ ...t, selecionada: false })))} className="text-[11px] text-slate-400 hover:text-slate-200">Nenhum</button>
+                <button type="button" onClick={() => setShowImport(false)} className="ml-1 text-slate-500 hover:text-slate-300"><X className="h-4 w-4" /></button>
+              </div>
+            </div>
+
+            {/* Lista de transações editável */}
+            <div className="max-h-80 overflow-y-auto">
+              {transacoesImport.map((t, i) => (
+                <div
+                  key={`${t.data}-${i}`}
+                  className={cn(
+                    "flex items-center gap-2 border-b border-slate-800/50 px-4 py-2 transition",
+                    t.selecionada ? "hover:bg-slate-800/30" : "opacity-40",
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    checked={t.selecionada}
+                    onChange={(e) => updateTransacao(i, { selecionada: e.target.checked })}
+                    className="h-3.5 w-3.5 shrink-0 accent-violet-500"
+                  />
+                  <input
+                    type="date"
+                    value={t.data}
+                    onChange={(e) => updateTransacao(i, { data: e.target.value })}
+                    className="w-28 shrink-0 bg-transparent text-[11px] text-slate-500 focus:outline-none focus:text-slate-300"
+                  />
+                  <input
+                    type="text"
+                    value={t.descricao}
+                    onChange={(e) => updateTransacao(i, { descricao: e.target.value.toUpperCase() })}
+                    className="min-w-0 flex-1 truncate bg-transparent text-xs text-slate-300 focus:outline-none focus:text-slate-100"
+                  />
+                  <select
+                    value={t.categoria}
+                    onChange={(e) => updateTransacao(i, { categoria: e.target.value })}
+                    className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300 focus:outline-none"
+                  >
+                    {CATS_DESP.map((c) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    value={Math.abs(t.valor)}
+                    step="0.01"
+                    min="0"
+                    onChange={(e) => updateTransacao(i, { valor: -Math.abs(parseFloat(e.target.value) || 0) })}
+                    className={cn(
+                      "w-20 shrink-0 bg-transparent text-right text-xs font-semibold focus:outline-none",
+                      t.valor < 0 ? "text-red-400" : "text-green-400",
+                    )}
+                  />
+                </div>
+              ))}
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-between border-t border-slate-800 px-5 py-3">
+              <span className="text-xs text-slate-500">
+                <span className="font-semibold text-slate-300">{transacoesImport.filter((t) => t.selecionada).length}</span> de {transacoesImport.length} selecionadas
+              </span>
+              <Btn tone="purple" small onClick={importarDespesas} disabled={transacoesImport.filter((t) => t.selecionada).length === 0}>
+                <span className="inline-flex items-center gap-1.5">
+                  <Download className="h-3.5 w-3.5" />
+                  Importar {transacoesImport.filter((t) => t.selecionada).length} despesas
+                </span>
+              </Btn>
+            </div>
+          </div>
+        )}
+
+        {showImport && (
+          <div className="mb-3 flex items-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2">
+            <BrainCircuit className="h-3.5 w-3.5 shrink-0 text-violet-400" />
+            <span className="text-[11px] text-violet-300">
+              Modo revisão ativo — o chat está conectado à tabela acima. Peça ao Jarvis para corrigir categorias, valores ou remover lançamentos.
+            </span>
+          </div>
+        )}
+
+        {!showImport && chatHistory.filter((m) => !m.isAnalysis).length === 0 && (
+          <div className="mb-5">
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Sugestões de perguntas</div>
+            <div className="flex flex-wrap gap-2">
+              {suggestions.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setQuestion(s)}
+                  className="rounded-full border border-violet-500/35 bg-violet-500/15 px-3.5 py-1.5 text-xs text-slate-300 transition hover:bg-violet-500/30 hover:text-slate-100"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {chatHistory.filter((m) => !m.isAnalysis).length > 0 && (
+          <div className="mb-4 flex max-h-96 flex-col gap-3 overflow-y-auto">
+            {chatHistory
+              .filter((m) => !m.isAnalysis)
+              .map((msg, i) => (
+                <div key={`${msg.role}-${i}`} className={cn("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
+                  <div
+                    className={cn(
+                      "max-w-[80%] border px-4 py-3 text-sm leading-6 text-slate-100",
+                      msg.role === "user"
+                        ? "rounded-[18px_18px_4px_18px] border-violet-400 bg-violet-500"
+                        : "rounded-[18px_18px_18px_4px] border-slate-700 bg-slate-800",
+                    )}
+                  >
+                    {msg.role === "assistant" ? renderMarkdown(msg.content) : msg.content}
+                  </div>
+                </div>
+              ))}
+
+            {chatLoading && (
+              <div className="flex gap-1.5 px-2 py-1">
+                {[0, 1, 2].map((i) => (
+                  <div
+                    key={i}
+                    className="h-2 w-2 animate-bounce rounded-full bg-violet-400"
+                    style={{ animationDelay: `${i * 0.15}s` }}
+                  />
+                ))}
+              </div>
+            )}
+
+            <div ref={chatEndRef} />
+          </div>
+        )}
+
+        <div className="flex gap-2.5">
+          <Input
+            className="flex-1 border-violet-500/40 focus:border-violet-400 focus:ring-violet-400/20"
+            placeholder={showImport ? "Ex: Mude os UBER para Transporte, remova o índice 3..." : "Ex: Qual mês gastei mais? Como reduzir despesas?"}
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && sendQuestion()}
+            disabled={chatLoading}
+          />
+          <Btn tone="purple" onClick={() => sendQuestion()} disabled={chatLoading || !question.trim()} small>
+            <span className="inline-flex items-center gap-1.5">
+              {chatLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+              Enviar
+            </span>
+          </Btn>
+        </div>
+      </Section>
     </div>
   );
 }
 function ReceitasTab({
   data,
   setData,
+  catsRec,
 }: {
   data: Receita[];
   setData: Dispatch<SetStateAction<Receita[]>>;
+  catsRec: string[];
 }) {
   const empty: ReceitaForm = {
     data: today(),
@@ -933,7 +1607,7 @@ function ReceitasTab({
 
           <Field label="Categoria" half>
             <Select value={f.categoria} onChange={set("categoria")}>
-              {CATS_REC.map((c) => (
+              {catsRec.map((c) => (
                 <option key={c}>{c}</option>
               ))}
             </Select>
@@ -996,9 +1670,11 @@ function ReceitasTab({
 function DespesasTab({
   data,
   setData,
+  catsDesp,
 }: {
   data: Despesa[];
   setData: Dispatch<SetStateAction<Despesa[]>>;
+  catsDesp: string[];
 }) {
   const empty: DespesaForm = {
     data: today(),
@@ -1051,7 +1727,7 @@ function DespesasTab({
   const total = data.reduce((s, r) => s + r.valor, 0);
   const pago = data.filter((r) => r.pago === "Sim").reduce((s, r) => s + r.valor, 0);
 
-  const byCat = CATS_DESP.map((cat) => ({
+  const byCat = catsDesp.map((cat) => ({
     cat,
     total: data.filter((r) => r.categoria === cat).reduce((s, r) => s + r.valor, 0),
   }))
@@ -1103,7 +1779,7 @@ function DespesasTab({
 
           <Field label="Categoria" half>
             <Select value={f.categoria} onChange={set("categoria")}>
-              {CATS_DESP.map((c) => (
+              {catsDesp.map((c) => (
                 <option key={c}>{c}</option>
               ))}
             </Select>
@@ -1735,7 +2411,7 @@ function LandingPage({
         preload="metadata"
         poster="/hero-financas.jpg.png"
       >
-        <source src="/hero-financas.mp4" type="video/mp4" />
+        <source src="/hero-financas.mp4.mp4" type="video/mp4" />
         <source src="/hero-financas.mp4.mp4" type="video/mp4" />
       </video>
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(120deg,rgba(2,6,23,0.88),rgba(15,23,42,0.82)_45%,rgba(2,6,23,0.92))]" />
@@ -1751,8 +2427,8 @@ function LandingPage({
               Controle financeiro pessoal em um único lugar.
             </h1>
             <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-200 sm:text-base">
-              Acompanhe receitas, despesas, contas a pagar, contas a receber, investimentos e use a análise com IA para tomar decisões
-              melhores.
+              Acompanhe receitas, despesas, contas a pagar, contas a receber e investimentos em um só painel. A análise com IA voltará em
+              breve.
             </p>
 
             <div className="mt-7 flex flex-wrap gap-3">
@@ -1765,10 +2441,16 @@ function LandingPage({
               </button>
               <button
                 type="button"
-                onClick={() => onGoToTab("ia")}
-                className="rounded-lg border border-violet-400/40 bg-violet-500/10 px-6 py-3 text-sm font-bold text-violet-200 transition hover:bg-violet-500/20"
+                onClick={() => IA_ENABLED && onGoToTab("ia")}
+                disabled={!IA_ENABLED}
+                className={cn(
+                  "rounded-lg px-6 py-3 text-sm font-bold transition",
+                  IA_ENABLED
+                    ? "border border-violet-400/40 bg-violet-500/10 text-violet-200 hover:bg-violet-500/20"
+                    : "cursor-not-allowed border border-slate-700 bg-slate-800/60 text-slate-500",
+                )}
               >
-                Ver análise com IA
+                {IA_ENABLED ? "Ver análise com IA" : "IA temporariamente desativada"}
               </button>
             </div>
           </div>
@@ -1819,6 +2501,14 @@ export default function App() {
   const [receber, setReceber] = useState<ReceberItem[]>([]);
   const [pagar, setPagar] = useState<PagarItem[]>([]);
   const [investimentos, setInvestimentos] = useState<Investimento[]>([]);
+  const [extraCatsDesp, setExtraCatsDesp] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem("extraCatsDesp") ?? "[]") as string[]; } catch { return []; }
+  });
+  const [extraCatsRec, setExtraCatsRec] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem("extraCatsRec") ?? "[]") as string[]; } catch { return []; }
+  });
+  const catsDesp = [...CATS_DESP, ...extraCatsDesp];
+  const catsRec = [...CATS_REC, ...extraCatsRec];
 
   useEffect(() => {
     const init = async () => {
@@ -1884,22 +2574,39 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <header className="sticky top-0 z-20 border-b border-slate-800 bg-slate-900/95 backdrop-blur">
-        <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
-          <button type="button" onClick={() => setShowLanding(true)} className="flex items-center gap-3 transition hover:opacity-90">
-            <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-blue-500 to-violet-500 text-lg">💰</div>
-            <div>
-              <div className="text-base font-extrabold">FinanControl</div>
-              <div className="text-[11px] text-slate-500">Gestão Financeira Pessoal</div>
+        <div className="mx-auto flex h-20 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
+          <button
+            type="button"
+            onClick={() => setShowLanding(true)}
+            className="group flex items-center gap-3 rounded-xl border border-slate-700/80 bg-slate-900/70 px-2 py-1.5 transition hover:border-slate-600 hover:bg-slate-900"
+          >
+            <img
+              src="/hero-logotipo.jpg.jpg"
+              alt="Logotipo FinanControl"
+              className="h-10 w-10 rounded-lg object-cover ring-1 ring-blue-400/40"
+            />
+            <div className="text-left leading-tight">
+              <div className="text-base font-extrabold tracking-tight text-slate-100">FinanControl</div>
+              <div className="text-[11px] font-medium text-slate-400">Gestão Financeira Pessoal</div>
             </div>
           </button>
 
           <div className="flex items-center gap-4">
             <div className="hidden items-center gap-4 text-xs sm:flex">
-              <span className="font-semibold text-emerald-400">↓ {fmt(totalRec)}</span>
-              <span className="font-semibold text-rose-400">↑ {fmt(totalDesp)}</span>
+              <span className="inline-flex items-center gap-1 font-semibold text-emerald-400">
+                <ArrowDown className="h-3.5 w-3.5" /> {fmt(totalRec)}
+              </span>
+              <span className="inline-flex items-center gap-1 font-semibold text-rose-400">
+                <ArrowUp className="h-3.5 w-3.5" /> {fmt(totalDesp)}
+              </span>
               <span className={cn("font-bold", saldo >= 0 ? "text-emerald-400" : "text-rose-400")}>= {fmt(saldo)}</span>
             </div>
-            <Btn tone="accent" small onClick={() => exportExcel(allData)}>⬇ Excel</Btn>
+            <Btn tone="accent" small onClick={() => exportExcel(allData)}>
+              <span className="inline-flex items-center gap-1.5">
+                <Download className="h-3.5 w-3.5" />
+                Excel
+              </span>
+            </Btn>
           </div>
         </div>
       </header>
@@ -1908,22 +2615,35 @@ export default function App() {
         <div className="mx-auto flex w-full max-w-6xl gap-1 overflow-x-auto px-4 sm:px-6">
           {tabs.map((tab) => {
             const isActive = tab.id === active;
+            const isDisabled = Boolean(tab.disabled);
             const TabIcon = tab.icon;
             return (
               <button
                 key={tab.id}
                 type="button"
-                onClick={() => setActive(tab.id)}
+                onClick={() => {
+                  if (!isDisabled) setActive(tab.id);
+                }}
+                disabled={isDisabled}
                 className={cn(
                   "flex items-center gap-1.5 whitespace-nowrap border-b-2 px-4 py-3 text-sm transition",
-                  isActive
+                  isDisabled
+                    ? "cursor-not-allowed border-transparent text-slate-600"
+                    : isActive
                     ? cn(tab.tone === "gold" ? "text-amber-300" : toneMap[tab.tone].text, toneMap[tab.tone].softBg, toneMap[tab.tone].border)
                     : "border-transparent text-slate-500 hover:text-slate-300",
                 )}
               >
                 <TabIcon className="h-4 w-4" /> {tab.label}
                 {tab.id === "ia" && (
-                  <span className="rounded bg-violet-500 px-1.5 py-0.5 text-[10px] font-bold text-white">IA</span>
+                  <span
+                    className={cn(
+                      "rounded px-1.5 py-0.5 text-[10px] font-bold text-white",
+                      IA_ENABLED ? "bg-violet-500" : "bg-slate-600",
+                    )}
+                  >
+                    {IA_ENABLED ? "IA" : "OFF"}
+                  </span>
                 )}
               </button>
             );
@@ -1932,12 +2652,12 @@ export default function App() {
       </div>
 
       <main className="mx-auto w-full max-w-6xl px-4 pb-16 pt-6 sm:px-6">
-        {active === "receitas" && <ReceitasTab data={receitas} setData={setReceitas} />}
-        {active === "despesas" && <DespesasTab data={despesas} setData={setDespesas} />}
+        {active === "receitas" && <ReceitasTab data={receitas} setData={setReceitas} catsRec={catsRec} />}
+        {active === "despesas" && <DespesasTab data={despesas} setData={setDespesas} catsDesp={catsDesp} />}
         {active === "receber" && <ReceberTab data={receber} setData={setReceber} />}
         {active === "pagar" && <PagarTab data={pagar} setData={setPagar} />}
         {active === "investimentos" && <InvestTab data={investimentos} setData={setInvestimentos} />}
-        {active === "ia" && <IATab allData={allData} />}
+        {active === "ia" && <IATab allData={allData} setDespesas={setDespesas} setReceitas={setReceitas} catsDesp={catsDesp} catsRec={catsRec} setExtraCatsDesp={setExtraCatsDesp} setExtraCatsRec={setExtraCatsRec} />}
       </main>
     </div>
   );

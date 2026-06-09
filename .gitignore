@@ -1,5 +1,29 @@
-﻿node_modules
-dist
-.vscode
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+
+# Environment variables (never commit credentials)
+.env
+.env.local
+.env.*.local
+
+# Editor
+.vscode/
+.claude/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS
 .DS_Store
-*.log
+Thumbs.db
+
+# TypeScript cache
+*.tsbuildinfo
+tsconfig.node.tsbuildinfo
+tsconfig.tsbuildinfo
