@@ -1,5 +1,5 @@
-// Constantes de dominio e tipos derivados.
-// Sao a unica fonte da verdade para categorias, formas de pagamento e tons visuais.
+// Constantes de domínio e tipos derivados.
+// Única fonte da verdade para categorias, formas de pagamento e tons visuais.
 
 export const CATS_DESP = [
   "Moradia",
@@ -49,12 +49,16 @@ export const TIPOS_INV = [
 
 export type Forma = (typeof FORMAS)[number];
 export type TipoInv = (typeof TIPOS_INV)[number];
-
-export type CategoriaDesp = string;
-export type CategoriaRec = string;
-
-export type YesNo = "Sim" | "Não";
 export type Tone = "accent" | "green" | "red" | "gold" | "purple";
-
-// Usado pelos formularios: um campo numerico que pode estar vazio.
 export type NumberOrEmpty = number | "";
+
+// Enums que fazem MATCH EXATO com o backend TypeORM
+export enum TransactionType {
+  RECEITA = "RECEITA",
+  DESPESA = "DESPESA",
+}
+
+export enum BillType {
+  PAGAR = "PAGAR",
+  RECEBER = "RECEBER",
+}

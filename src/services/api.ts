@@ -1,58 +1,109 @@
 import axios from "axios";
-import type { Despesa } from "../types";
+import type {
+  Transaction,
+  CreateTransactionDto,
+  UpdateTransactionDto,
+  Bill,
+  CreateBillDto,
+  UpdateBillDto,
+  Investment,
+  CreateInvestmentDto,
+  UpdateInvestmentDto,
+  AuthUser,
+} from "../types";
+import { TransactionType, BillType } from "../types";
 
-// Em dois repos separados, o frontend aponta diretamente para o backend.
-// Define VITE_API_URL no .env do frontend (ex.: http://localhost:8000/api).
-const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined) ??
-  "http://localhost:8000/api";
+const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "/api";
 
 export const api = axios.create({
   baseURL: API_BASE,
   headers: { "Content-Type": "application/json" },
 });
 
-// ------------------------------------------------------------------
-// Camada anti-corrupcao
-// O backend usa `pago: boolean`; a UI continua a usar "Sim"/"Não".
-// A traducao acontece aqui, num unico sitio, e nao espalhada pelos componentes.
-// ------------------------------------------------------------------
-type DespesaApi = Omit<Despesa, "pago"> & { pago: boolean };
-
-const despesaFromApi = (d: DespesaApi): Despesa => ({
-  ...d,
-  pago: d.pago ? "Sim" : "Não",
+// ── Interceptor de request: injeta o Bearer token em todas as chamadas ────────
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem("finapp_token");
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
 });
 
-const despesaToApi = (d: Partial<Despesa>): Record<string, unknown> => {
-  const { pago, ...rest } = d;
-  return {
-    ...rest,
-    ...(pago !== undefined && { pago: pago === "Sim" }),
-  };
-};
+// ── Interceptor de response: logout automático em 401 ────────────────────────
+api.interceptors.response.use(
+  (res) => res,
+  (err: unknown) => {
+    if (
+      axios.isAxiosError(err) &&
+      err.response?.status === 401
+    ) {
+      window.dispatchEvent(new Event("auth:logout"));
+    }
+    return Promise.reject(err);
+  },
+);
 
-export const despesasApi = {
-  list: () =>
-    api.get<DespesaApi[]>("/despesas").then((r) => r.data.map(despesaFromApi)),
-
-  create: (d: Omit<Despesa, "id">) =>
-    api.post<DespesaApi>("/despesas", despesaToApi(d)).then((r) => despesaFromApi(r.data)),
-
-  update: (id: number, patch: Partial<Despesa>) =>
+// ── Auth ──────────────────────────────────────────────────────────────────────
+export const authApi = {
+  register: (data: { name: string; email: string; password: string }) =>
     api
-      .patch<DespesaApi>(`/despesas/${id}`, despesaToApi(patch))
-      .then((r) => despesaFromApi(r.data)),
+      .post<{ token: string; user: AuthUser }>("/auth/register", data)
+      .then((r) => r.data),
 
-  remove: (id: number) => api.delete(`/despesas/${id}`).then(() => id),
+  login: (data: { email: string; password: string }) =>
+    api
+      .post<{ token: string; user: AuthUser }>("/auth/login", data)
+      .then((r) => r.data),
 };
 
-// ------------------------------------------------------------------
-// IA (Groq via backend)
-// ------------------------------------------------------------------
-export const iaApi = {
-  createChat: () => api.post<{ id: string }>("/ia/chats").then((r) => r.data),
+// ── Transactions ──────────────────────────────────────────────────────────────
+export const transactionsApi = {
+  list: (type?: TransactionType) =>
+    api
+      .get<Transaction[]>("/transactions", { params: type ? { type } : {} })
+      .then((r) => r.data),
 
+  create: (dto: CreateTransactionDto) =>
+    api.post<Transaction>("/transactions", dto).then((r) => r.data),
+
+  update: (id: number, dto: UpdateTransactionDto) =>
+    api.patch<Transaction>(`/transactions/${id}`, dto).then((r) => r.data),
+
+  remove: (id: number) => api.delete(`/transactions/${id}`).then(() => id),
+};
+
+// ── Bills ─────────────────────────────────────────────────────────────────────
+export const billsApi = {
+  list: (type?: BillType) =>
+    api
+      .get<Bill[]>("/bills", { params: type ? { type } : {} })
+      .then((r) => r.data),
+
+  create: (dto: CreateBillDto) =>
+    api.post<Bill>("/bills", dto).then((r) => r.data),
+
+  update: (id: number, dto: UpdateBillDto) =>
+    api.patch<Bill>(`/bills/${id}`, dto).then((r) => r.data),
+
+  liquidar: (id: number) =>
+    api.patch<Bill>(`/bills/${id}/liquidar`).then((r) => r.data),
+
+  remove: (id: number) => api.delete(`/bills/${id}`).then(() => id),
+};
+
+// ── Investments ───────────────────────────────────────────────────────────────
+export const investmentsApi = {
+  list: () => api.get<Investment[]>("/investments").then((r) => r.data),
+
+  create: (dto: CreateInvestmentDto) =>
+    api.post<Investment>("/investments", dto).then((r) => r.data),
+
+  update: (id: number, dto: UpdateInvestmentDto) =>
+    api.patch<Investment>(`/investments/${id}`, dto).then((r) => r.data),
+
+  remove: (id: number) => api.delete(`/investments/${id}`).then(() => id),
+};
+
+// ── IA ────────────────────────────────────────────────────────────────────────
+export const iaApi = {
   chat: (message: string, chatId?: string) =>
     api
       .post<{ response: string; chatId: string }>("/ia/chat", { message, chatId })

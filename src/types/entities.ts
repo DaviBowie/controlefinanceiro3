@@ -1,83 +1,62 @@
-import type {
-  CategoriaDesp,
-  CategoriaRec,
-  Forma,
-  NumberOrEmpty,
-  TipoInv,
-  YesNo,
-} from "./enums";
+import type { NumberOrEmpty, TransactionType, BillType } from "./enums";
 
-export interface Receita {
+// ── Transaction (match exato com src/transactions/transaction.entity.ts) ─────
+export interface Transaction {
   id: number;
-  data: string;
+  type: TransactionType;
+  data: string;        // YYYY-MM-DD
   descricao: string;
   valor: number;
-  categoria: CategoriaRec;
-  forma: Forma;
-  recebido: YesNo;
+  categoria: string;
+  forma: string;
+  status: boolean;     // true = pago (DESPESA) / recebido (RECEITA)
+  parcela: string;     // ex: "3/12" — vazio para RECEITA
   obs: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface Despesa {
-  id: number;
-  data: string;
-  descricao: string;
-  valor: number;
-  categoria: CategoriaDesp;
-  forma: Forma;
-  pago: YesNo;
-  parcela: string;
-  obs: string;
-}
+export type CreateTransactionDto = Omit<Transaction, "id" | "createdAt" | "updatedAt">;
+export type UpdateTransactionDto = Partial<CreateTransactionDto>;
+export type TransactionForm = Omit<CreateTransactionDto, "valor"> & { valor: NumberOrEmpty };
 
-export interface ReceberItem {
+// ── Bill (match exato com src/bills/bill.entity.ts) ──────────────────────────
+export interface Bill {
   id: number;
-  devedor: string;
-  vencimento: string;
+  type: BillType;
+  contraparte: string; // credor (PAGAR) ou devedor (RECEBER)
+  vencimento: string;  // YYYY-MM-DD
   valor: number;
   descricao: string;
-  recebidoEm: string;
-  forma: Forma;
+  liquidadoEm: string | null; // null = pendente
+  forma: string;
+  recorrente: boolean;
   obs: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface PagarItem {
-  id: number;
-  credor: string;
-  vencimento: string;
-  valor: number;
-  descricao: string;
-  pagoEm: string;
-  forma: Forma;
-  recorrente: YesNo;
-  obs: string;
-}
+export type CreateBillDto = Omit<Bill, "id" | "createdAt" | "updatedAt">;
+export type UpdateBillDto = Partial<CreateBillDto>;
+export type BillForm = Omit<CreateBillDto, "valor"> & { valor: NumberOrEmpty };
 
-export interface Investimento {
+// ── Investment (match exato com src/investments/investment.entity.ts) ─────────
+export interface Investment {
   id: number;
   ativo: string;
-  tipo: TipoInv;
-  dataCompra: string;
+  tipo: string;
+  dataCompra: string; // YYYY-MM-DD
   aportado: number;
   valorAtual: number;
-  vencimento: string;
+  vencimento: string; // YYYY-MM-DD ou ""
   obs: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface AllData {
-  receitas: Receita[];
-  despesas: Despesa[];
-  receber: ReceberItem[];
-  pagar: PagarItem[];
-  investimentos: Investimento[];
-}
-
-// --- Tipos de formulario (valores monetarios podem estar vazios enquanto se digita) ---
-export type ReceitaForm = Omit<Receita, "id" | "valor"> & { valor: NumberOrEmpty };
-export type DespesaForm = Omit<Despesa, "id" | "valor"> & { valor: NumberOrEmpty };
-export type ReceberForm = Omit<ReceberItem, "id" | "valor"> & { valor: NumberOrEmpty };
-export type PagarForm = Omit<PagarItem, "id" | "valor"> & { valor: NumberOrEmpty };
-export type InvestForm = Omit<Investimento, "id" | "aportado" | "valorAtual"> & {
+export type CreateInvestmentDto = Omit<Investment, "id" | "createdAt" | "updatedAt">;
+export type UpdateInvestmentDto = Partial<CreateInvestmentDto>;
+export type InvestmentForm = Omit<CreateInvestmentDto, "aportado" | "valorAtual"> & {
   aportado: NumberOrEmpty;
   valorAtual: NumberOrEmpty;
 };
